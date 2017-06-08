@@ -1,3 +1,5 @@
+
+
 /* ===========================================================================================*/
 /*                                                                                            */
 /*      Arduino Kiln by Jack D. Ciallella                                                     */
@@ -8,6 +10,7 @@
 /* ===========================================================================================*/
 
 /* Includes */
+#include <SD.h>
 #include <SPI.h>
 #include <Wire.h>
 #include <EEPROM.h>
@@ -20,6 +23,7 @@ Adafruit_SSD1306 display = Adafruit_SSD1306();
 Adafruit_HTU21DF htu = Adafruit_HTU21DF();
 
 /* Pin Mapping */
+
 #define scrnButtonC    5        // C. Screen Power
 #define hitsButtonB    6        // B. Resets Hits       [ 6 = Pin A7]
 #define tempButtonA    9        // A. Sets Temperature  [ 9 = Pin A9]
@@ -82,7 +86,14 @@ int iCount = 0;
 int realHumid;
 float realTempC;
 int realTempF;
+unsigned long milliTime;
+long previousMillis = 0;
+long loginterval = 30;                // In Seconds
 
+
+/* Read Write Data */
+File myFile;
+File myFileTwo;
 
 /* ===========================================================================================*/
 /*                                                                                            */
@@ -105,14 +116,26 @@ void setup()
   display.setRotation(2);                        // Rotate Display: 0, 90, 180 or 270* (0,1,2,3)
   // display.invertDisplay(true);                // White screen logo
   display.display();                             // Display splashscreen
-  delay(500);                                   // Time to display splash screen
+  delay(500);                                    // Time to display splash screen
   display.clearDisplay();                        // Clear buffer
 
   /* Setup Timer */
   // Add Clock here if you want
+  //SD.begin();                                    // Starts SD Card
 
   /* Read from Memory */
-  //chButtonCount = EEPROM.read(epAddress);        // Change to set for heat setting save
+  //chButtonCount = EEPROM.read(epAddress);      // Change to set for heat setting save
+
+
+  Serial.print("Initializing SD card...");
+
+  if (!SD.begin(4)) {
+    Serial.println("initialization failed!");
+    return;
+  }
+  Serial.println("initialization done.");
+
+
 
 }
 
@@ -132,8 +155,8 @@ void loop()
   Serial.begin(9600);
 
   /* Test Readings */
-  Serial.print("Temp: "); Serial.print(htu.readTemperature());
-  Serial.print("\t\tHum: "); Serial.println(htu.readHumidity());
+  // Serial.print("Temp: "); Serial.print(htu.readTemperature());
+  // Serial.print("\t\tHum: "); Serial.println(htu.readHumidity());
 
   /* ===========================================================================================*/
   /*                                                                                            */
@@ -143,10 +166,9 @@ void loop()
 
   /* Internal */  // Need to add data logging function
 
-
-
-
   RunSensors();
+  LogData();
+
   // ReadTemp();                                   // Reads Ambient Temp
   Smooth();                                     // Removes Jitter from Voltage Reads
 
@@ -154,6 +176,7 @@ void loop()
   ButtonReader();                               // Check button presses
   ResetCount();                                 // Reset button counters
   HoldButton();                                 // De-bounces buttons
+
 
   /* Memory */
   //WriteEEPROM();                                // Saves Information Last
@@ -256,17 +279,15 @@ void DateTimeMenu()
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(3, 4);
-  display.println("JUNE 5, 2007");
+  display.println("MILLIS TIME");
   display.setTextSize(2);
   display.setCursor(3, 12);
-  display.println("3:15PM");
+  display.println(milliTime);
   display.display();
 }
 
 void HumidHistoryMenu()
 {
-  int plotY = map(realHumid, 1, 100, 1, 24);
-
   // Humidity  Low #
   display.setTextColor(WHITE);
   display.setTextSize(2);
@@ -293,13 +314,23 @@ void HumidHistoryMenu()
      map humidity 1-100 with the screen size 32px
      exclude far top and bottom pixels by 1 from top, 6 from bottom px ea
   */
-  int startX = 80;
 
-  for (int i = 0; i <= 47; i++) {
-    display.drawFastVLine(startX + i, 0, plotY, 1);
+
+  
+  for (int dataPoints = 0; dataPoints < 47; dataPoints++) {
+
+    int startX = 80;
+    
+    /* Reading Data */
+    myFile = SD.open("kilndata.txt");                 // re-open
+    int tempRead = Serial.write(myFile.read());              // Read it
+    int plotY = map(tempRead, 1, 100, 1, 24);
+    display.drawFastVLine(startX + dataPoints, 0, plotY, 1);
   }
+
   display.display();
   display.clearDisplay();
+  myFile.close();                                 // close the file:
 }
 
 void TempHistoryMenu()
@@ -417,6 +448,57 @@ void FireCoil()
 /*    Internal Functions                                                                      */
 /*                                                                                            */
 /* ===========================================================================================*/
+
+/* Log Data to SD Card */
+void LogData() {
+
+  milliTime = (millis() / 1000);
+
+  if (milliTime - previousMillis > loginterval) {
+    previousMillis = milliTime;
+
+    /* Open & Write to First File, then Close */
+    myFile = SD.open("kilndata.txt", FILE_WRITE);     // open
+
+    myFile.print("Time: ");                           // write
+    myFile.print(milliTime);
+    myFile.println("s");
+    myFile.print("Humidity: ");
+    myFile.print(realHumid);
+    myFile.println(" %");
+    myFile.print("Temperature: ");
+    myFile.print(realTempF);
+    myFile.println(" °");
+    myFile.println('\n');
+
+    myFile.close();                                   // close
+
+    /* Do Second File */
+    myFileTwo = SD.open("tempplot.txt", FILE_WRITE);  // open
+
+    String dataString = "";
+
+    dataString += String(realTempF);                  // write
+    dataString += ",";
+    myFileTwo.print(dataString);
+
+    myFileTwo.close();                                // close
+  }
+}
+
+
+/* Open & Read File, then Close */
+void DisplayData() {
+
+  for (int dataPoints = 0; dataPoints < 47; dataPoints++) {
+    /* Reading Data */
+    myFile = SD.open("kilndata.txt");                 // re-open
+    Serial.write(myFile.read());                      // Read it
+
+  }
+  myFile.close();                                 // close the file:
+}
+
 
 /* Smooth Readings */
 void Smooth()
