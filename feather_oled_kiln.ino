@@ -1,5 +1,3 @@
-
-
 /* ===========================================================================================*/
 /*                                                                                            */
 /*      Arduino Kiln by Jack D. Ciallella                                                     */
@@ -30,7 +28,10 @@ Adafruit_HTU21DF htu = Adafruit_HTU21DF();
 #define mosfetPin      10       // Output to Mosfet
 #define rdboardLED     13       // On-board LED
 #define thermoPin      A2       // TMP36 Temp Sensor
+#define intakeFan               // Fresh Air Fan
+#define internalFans            // Kiln Air Circulation Fans
 
+#define extLedPin 11
 
 /* Enable / Disable */
 #define VBAT_ENABLED   0        // Enable / Disable integrated batt mgmt
@@ -89,11 +90,17 @@ int realTempF;
 unsigned long milliTime;
 long previousMillis = 0;
 long loginterval = 30;                // In Seconds
-
+int humidHigh = 0;
+int humidLow = 150;
+int tempHigh = 0;
+int tempLow = 150;
+bool ledState = true;
+bool ventFanStatus = true;
 
 /* Read Write Data */
 File myFile;
 File myFileTwo;
+File plotFile;
 
 /* ===========================================================================================*/
 /*                                                                                            */
@@ -166,16 +173,18 @@ void loop()
 
   /* Internal */  // Need to add data logging function
 
-  RunSensors();
-  LogData();
+  RunSensors();                                 // Runs HTU21D-F Humidity / Temp Sensor
+  LogData();                                    // Saves Data to SD Card
 
-  // ReadTemp();                                   // Reads Ambient Temp
-  Smooth();                                     // Removes Jitter from Voltage Reads
+  ReadTemp();                                   // Reads Ambient Temp
+  Smooth();                                     // Averages Sensor Readings
 
   /* Buttons */
   ButtonReader();                               // Check button presses
   ResetCount();                                 // Reset button counters
   HoldButton();                                 // De-bounces buttons
+  LightsOn();
+  ExchangeAir();
 
 
   /* Memory */
@@ -190,18 +199,20 @@ void loop()
 
   /* Conditionally Display Menus */
   if (sButtonCount <= 1 && hButtonCount == 0) {
-    display.invertDisplay(false);
     MainMenu();                               // Render screen icons & text
   }
   if (sButtonCount == 2 && hButtonCount == 0) {
-    display.invertDisplay(true);
-    DateTimeMenu();
+    //SecondMenu();
   }
   if (hButtonCount == 1) {
     HumidHistoryMenu();
   }
   if (hButtonCount == 2) {
     TempHistoryMenu();
+  }
+  if (hButtonCount == 3) {
+    display.invertDisplay(true);
+    DateTimeMenu();
   }
 } /* Close Program */
 
@@ -215,45 +226,54 @@ void loop()
 /*                                                                                            */
 /* ===========================================================================================*/
 
+
 /* Creates Main Interface  */
 void MainMenu()
 {
   display.clearDisplay();
+  display.invertDisplay(false);
 
   // Humidity  #
   display.setTextColor(WHITE);
   display.setTextSize(2);
-  display.setCursor(0, 4);
+  display.setCursor(0, 0);
   display.print(realHumid);
   display.println("%");
 
   // Humid Text
   display.setTextSize(1);
-  display.setCursor(0, 21);
+  display.setCursor(3, 24);
   display.println("HUMID");
+  display.drawFastHLine(0, 19, 36, WHITE);
 
   // Temp  #
   display.setTextColor(WHITE);
   display.setTextSize(2);
-  display.setCursor(46, 4);
+  if (realTempF > 100) {
+    display.setCursor(46, 0);
+  }
+  else {
+    display.setCursor(52, 0);
+  }
   display.print(realTempF);
-  display.println("*");
+  display.write(0xf7);
+  display.drawFastHLine(46, 19, 45, WHITE);
 
   // Temp Text
   display.setTextSize(1);
-  display.setCursor(46, 21);
+  display.setCursor(56, 24);
   display.println("TEMP");
 
   // Dry Text
   display.setTextSize(1);
-  display.setCursor(103, 21);
+  display.setCursor(103, 25);
   display.println("DRY");
-  // display.drawFastVLine(93, 4, 26, WHITE);
+  display.drawFastHLine(100, 19, 23, WHITE);
 
   /* Adjusts Screen OF/HI/MD/LO (via Button A) */
   display.setTextColor(WHITE);
   display.setTextSize(2);
-  display.setCursor(103, 4);
+  display.setCursor(101, 0);
 
   switch (tButtonCount) {
     case 0:
@@ -273,28 +293,39 @@ void MainMenu()
   display.display();
 }
 
-/* Secondary Date / Time Page */
+
+/*  Millis Time Menu */
 void DateTimeMenu()
 {
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(3, 4);
   display.println("MILLIS TIME");
-  display.setTextSize(2);
   display.setCursor(3, 12);
+  display.setTextSize(2);
   display.println(milliTime);
   display.display();
 }
 
+/* High & Low Humidity Menu */
 void HumidHistoryMenu()
 {
-  // Humidity  Low #
+
+  if (realHumid > humidHigh) {
+    humidHigh = realHumid;
+  }
+
+  if (realHumid < humidLow) {
+    humidLow = realHumid;
+  }
+
   display.setTextColor(WHITE);
   display.setTextSize(2);
   display.setCursor(0, 0);
-  display.print(realHumid);
-  display.print("/");
-  display.print("105");
+  display.print(humidLow);
+  display.print("% / ");
+  display.print(humidHigh);
+  display.print("%");
 
   // Humid Text
   display.setTextSize(1);
@@ -315,27 +346,54 @@ void HumidHistoryMenu()
      exclude far top and bottom pixels by 1 from top, 6 from bottom px ea
   */
 
+  /*
+    //                                                                                                         *****************BM
+    for (int dataPoints = 0; dataPoints < 47; dataPoints++) {
 
-  
-  for (int dataPoints = 0; dataPoints < 47; dataPoints++) {
+      int startX = 78;
 
-    int startX = 80;
-    
-    /* Reading Data */
-    myFile = SD.open("kilndata.txt");                 // re-open
-    int tempRead = Serial.write(myFile.read());              // Read it
-    int plotY = map(tempRead, 1, 100, 1, 24);
-    display.drawFastVLine(startX + dataPoints, 0, plotY, 1);
-  }
+      // Reading Data
+      plotFile = SD.open("tempplot.txt");                 // re-open
+      int tempRead = Serial.write(plotFile.read());       // Read it
+      int plotY = map(tempRead, 1, 200, 1, 24);
+      display.drawFastVLine(startX + dataPoints, 0, plotY, 1);
+    }
+
+  */
 
   display.display();
   display.clearDisplay();
   myFile.close();                                 // close the file:
 }
 
+/* High & Low Temperature Menu */
 void TempHistoryMenu()
 {
-  // Copy & Paste the above with substitute for temperature numbers and new range
+  if (realTempF > tempHigh) {
+    tempHigh = realTempF;
+  }
+
+  if (realTempF < tempLow) {
+    tempLow = realTempF;
+  }
+
+  display.setTextColor(WHITE);
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.print(tempLow);
+  display.write(0xf7);                    // degrees
+  display.print(" / ");
+  display.print(tempHigh);
+  display.write(0xf7);
+
+  // Humid Text
+  display.setTextSize(1);
+  display.setCursor(0, 22);
+  display.println("48HR MIN/MAX TEMP");
+
+  display.display();
+  display.clearDisplay();
+
 }
 
 /* ===========================================================================================*/
@@ -343,6 +401,32 @@ void TempHistoryMenu()
 /*    Buttons - Read & Count & Reset                                                          */
 /*                                                                                            */
 /* ===========================================================================================*/
+
+/* Turns on Lights via A Button */
+void LightsOn()
+{
+  if (sButtonCount == 2) {
+    ledState = true;
+  }
+  else {
+    ledState = false;
+  }
+
+  // Turns on Relay
+  if (ledState = true) {
+    digitalWrite(extLedPin, HIGH);    // Use an empty pin on micro-controller, do not use relay
+  }
+}
+
+void ExchangeAir()
+{
+  if (tButtonCount == 2 && hButtonCount >= 1) {
+    ventFanStatus = true;
+  }
+  else {
+    ventFanStatus = false;
+  }
+}
 
 /* Read Temperature Button + Haptic Feedback (Add to All buttons later) */
 void ButtonReader()
@@ -366,10 +450,10 @@ void ButtonReader()
 /* Reset Button Counts */
 void ResetCount()
 {
-  if (tButtonState == LOW && tButtonCount >= 2)  {
+  if (tButtonState == LOW && tButtonCount >= 3)  {
     tButtonCount = 0;
   }
-  if (hButtonState == LOW && hButtonCount >= 3)  {
+  if (hButtonState == LOW && hButtonCount >= 4)  {
     hButtonCount = 0;
     sButtonCount = 0;
   }
@@ -527,16 +611,10 @@ void ReadTemp()
 
   delay(1);
 
-  if (avgTempRead >= 180) {
-
-    analogWrite(mosfetPin, 0);
-
-    display.clearDisplay();
-    display.invertDisplay(true);
-    display.setCursor(13, 13);
-    display.println("TOO HOT!!! WAIT...");
-    display.display();
-    delay(3500);
+  /* Run Fans */
+  if (avgTempRead >= 150) {
+    digitalWrite(mosfetPin, 255);
+    //delay(3500);
   }
 }
 
@@ -561,7 +639,7 @@ void RunSensors()
   realTempF = (realTempC * 9.0 / 5.0) + 32.0;
 
   if (realHumid >= 100) {
-    realHumid = 100;
+    realHumid = 99;
   }
 }
 
